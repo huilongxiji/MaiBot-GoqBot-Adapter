@@ -6,6 +6,7 @@ NoneBot 等其他框架可以和 MaiBot 同时连在同一个 goqbot 上，各�
 - 连接：正向（插件连 goqbot）或反向（goqbot 连插件）二选一。
 - 入站：goqbot message 事件 → MaiBot 消息，全部接收不过滤（会话放行交给 MaiBot 的 adapter_policy）。
 - 出站：先用 passive_only 尝试被动回复；没有被动凭证时按「主动消息」开关与单群频率限制处理。
+- 聊天工具（tools.py）与开放接口（apis.py）：goqbot 特有能力，各自单独开关，默认关闭。
 """
 
 from __future__ import annotations
@@ -18,10 +19,12 @@ import contextlib
 import aiohttp
 from maibot_sdk import ConfigWidget, ConfigWidgetState, MaiBotPlugin, MessageGateway, PluginConfigBase
 
+from .apis import GoqbotApisMixin
 from .codec import InboundCodec, OutboundCodec
 from .config import GoqbotAdapterSettings
 from .constants import GATEWAY_NAME, GATEWAY_PROTOCOL, PASSIVE_ONLY_MIN_GOQBOT_VERSION
 from .sender import OutboundSender
+from .tools import TOOL_SWITCHES, GoqbotToolsMixin
 from .transport import TransportNotConnected, _BaseTransport, build_transport
 
 
@@ -45,7 +48,7 @@ def _version_tuple(version: str) -> Tuple[int, ...]:
     return tuple(parts)
 
 
-class GoqbotAdapterPlugin(MaiBotPlugin):
+class GoqbotAdapterPlugin(GoqbotToolsMixin, GoqbotApisMixin, MaiBotPlugin):
     """goqbot 双工消息网关。"""
 
     config_model: ClassVar[type[PluginConfigBase] | None] = GoqbotAdapterSettings
@@ -73,6 +76,7 @@ class GoqbotAdapterPlugin(MaiBotPlugin):
     # ── 生命周期 ────────────────────────────────────────────────
 
     async def on_load(self) -> None:
+        await self._sync_features()
         await self._restart()
 
     async def on_unload(self) -> None:
@@ -83,15 +87,63 @@ class GoqbotAdapterPlugin(MaiBotPlugin):
         if scope != "self":
             return
         self.set_plugin_config(config_data)
+        await self._sync_features()
         await self._restart()
+
+    # ── 聊天工具 / 开放接口的开关 ────────────────────────────────
+
+    def get_components(self) -> List[Dict[str, Any]]:
+        """注册组件：工具按开关写入初始启用状态，并限定在本连接的平台；开放接口只注册已开启的分组。"""
+
+        settings = self._settings()
+        self._rebuild_dynamic_apis()
+        components = super().get_components()
+        for component in components:
+            if component.get("type") != "TOOL" or component.get("name") not in TOOL_SWITCHES:
+                continue
+            metadata = dict(component.get("metadata") or {})
+            metadata["enabled"] = bool(getattr(settings.tools, TOOL_SWITCHES[component["name"]]))
+            metadata["platforms"] = [settings.plugin.platform]
+            component["metadata"] = metadata
+            # SDK 的 Tool 装饰器只把 chat_scope 放进 metadata，Host 读取的是组件顶层字段。
+            component["chat_scope"] = str(metadata.get("chat_scope") or "all")
+        return components
+
+    async def _sync_features(self) -> None:
+        """把「聊天工具」「开放接口」的开关同步到 MaiBot。"""
+
+        tools = self._settings().tools
+        for name, switch in TOOL_SWITCHES.items():
+            enabled = bool(getattr(tools, switch))
+            full_name = f"{self.ctx.plugin_id}.{name}"
+            try:
+                if enabled:
+                    result = await self.ctx.component.enable_component(full_name, "TOOL")
+                else:
+                    result = await self.ctx.component.disable_component(full_name, "TOOL")
+            except Exception as exc:  # noqa: BLE001
+                self.ctx.logger.warning(f"[goqbot] 同步工具 {name} 开关失败: {exc}")
+                continue
+            if result is False or (isinstance(result, dict) and not result.get("success", False)):
+                error = result.get("error") if isinstance(result, dict) else result
+                self.ctx.logger.warning(f"[goqbot] 同步工具 {name} 开关失败: {error}")
+
+        names = self._rebuild_dynamic_apis()
+        try:
+            accepted = await self.sync_dynamic_apis(offline_reason="该接口已在 goqbot 适配器配置中关闭")
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning(f"[goqbot] 同步开放接口失败: {exc}")
+            return
+        if not accepted:
+            self.ctx.logger.warning("[goqbot] MaiBot 未接受开放接口更新")
+        elif names:
+            self.ctx.logger.debug(f"[goqbot] 已开放接口: {', '.join(names)}")
 
     # ── 配置页运行时控件 ────────────────────────────────────────
 
     async def get_config_widget_state(self) -> Dict[str, ConfigWidgetState]:
         if self._account_id:
-            text = f"已连接：self_id {self._account_id}，连接标识 {self._platform}"
-            if self._goqbot_version:
-                text += f"，goqbot {self._goqbot_version}"
+            text = f"QQ {self._account_id}，goqbot 程序版本 {self._goqbot_version or '未知'}"
             tone = "success"
         elif self._transport is not None:
             text = f"等待 goqbot：{self._transport.describe()}"

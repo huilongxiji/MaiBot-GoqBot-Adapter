@@ -59,12 +59,33 @@ def test_active_section_layout():
 def test_other_sections():
     sections = schema()
     assert [n for n, _ in sorted(sections.items(), key=lambda kv: kv[1]["order"])] == [
-        "plugin", "connection", "active", "message", "debug",
+        "plugin", "connection", "active", "message", "tools", "api", "debug",
     ]
     plugin_fields = sections["plugin"]["fields"]
     assert plugin_fields["platform"]["label"] == "连接标识"
     widgets = plugin_mod.GoqbotAdapterPlugin().get_webui_config_schema()["runtime_widgets"]
     assert {w["id"] for w in widgets} == {"connection", "reconnect"}
+
+
+def test_feature_sections_default_off():
+    defaults = plugin_mod.GoqbotAdapterPlugin().get_default_config()
+    assert all(v is False for k, v in defaults["tools"].items() if k.endswith("_enabled"))
+    assert all(v is False for v in defaults["api"].values())
+    sections = schema()
+    tools = sorted(sections["tools"]["fields"].values(), key=lambda f: f["order"])
+    assert [f["label"] for f in tools] == [
+        "Markdown 消息", "图文卡片", "互动召回", "主动消息权限查询", "撤回消息", "群成员禁言", "禁言最长时长（秒）",
+    ]
+    api = sorted(sections["api"]["fields"].values(), key=lambda f: f["order"])
+    assert [f["label"] for f in api] == ["消息发送", "素材库", "菜单与指令面板", "状态查询", "群管理", "通用动作透传"]
+
+
+def test_old_config_gets_feature_defaults():
+    settings = config.GoqbotAdapterSettings.model_validate(
+        {"plugin": {"enabled": True, "config_version": "1.1.0"}, "connection": {"address": "ws://127.0.0.1:6700"}}
+    )
+    assert settings.tools.markdown_enabled is False and settings.api.raw_enabled is False
+    assert settings.runtime_config_error() == ""
 
 
 def test_platform_validation():

@@ -18,11 +18,14 @@ goqbot 和 go-cqhttp 一样，可以同时把事件广播给多个 OneBot 下游
 | 插件设置 | 启用适配器、连接标识 |
 | 连接 | 连接方式（正向 / 反向）、地址、访问令牌、重连等待、心跳间隔、动作超时 |
 | 主动消息 | 私聊主动消息、群聊主动消息、单群最多条数、时间窗口 |
-| 消息 / 调试 | 图片下载、原始报文日志 |
+| 消息 | 图片下载 |
+| 聊天工具 | 6 个 goqbot 特有工具的开关、禁言最长时长（见下文「聊天工具」） |
+| 开放接口 | 6 组供其他插件调用的接口开关（见下文「开放接口」） |
+| 调试 | 原始报文日志 |
 
 黑白名单不在插件配置页里，见下文「黑白名单」。
 
-配置页顶部会显示 goqbot 连接状态，并提供「重新连接」按钮。
+配置页顶部会显示 goqbot 连接状态（连上后显示为「QQ 机器人 ID，goqbot 程序版本 x.x.x」），并提供「重新连接」按钮。
 
 ## 地址格式
 
@@ -106,6 +109,48 @@ QQ 官方机器人的回复分为**被动回复**（针对用户刚发的消息�
 - 这些数字 ID 就是 MaiBot 聊天记录 / 用户信息里显示的 ID，也可以在「调试 → 打印原始报文」开启后从日志里查到。
 - QQ 官方机器人里同一个人在私聊和群聊中的 ID 不同；私聊规则只对私聊生效，群里单个发言人不在框架名单的过滤范围内。
 
+## 聊天工具
+
+让 MaiBot 的模型在聊天中直接使用 goqbot 特有的能力。每个工具单独开关，**默认全部关闭**，保存配置后立即生效；
+开启的工具会出现在 WebUI 插件详情的「已注册组件」中，且只在本连接（连接标识）的会话里可用。
+
+| 开关 | 工具名 | 作用 | 说明 |
+| --- | --- | --- | --- |
+| Markdown 消息 | `goqbot_send_markdown` | 发送原生 Markdown，可附带按钮 | 按钮支持跳转（link）和指令（command），最多 15 个；遵循「主动消息」开关 |
+| 图文卡片 | `goqbot_send_card` | 发送标题 + 简介 + 封面图的链接卡片 | 链接与图片必须是 https；遵循「主动消息」开关 |
+| 互动召回 | `goqbot_send_wakeup` | 给私聊用户发互动召回消息 | 用户最后一次私聊后 30 天内分 4 个周期，每周期 1 条；不受「主动消息」开关影响 |
+| 主动消息权限查询 | `goqbot_get_push_state` | 查询当前群 / 私聊能否主动发消息 | 群：群主是否开启「机器人主动发言」、机器人身份；私聊：用户是否允许推送 |
+| 撤回消息 | `goqbot_recall_message` | 撤回机器人自己发过的消息 | QQ 官方只能撤回机器人自己的消息，且有时间限制 |
+| 群成员禁言 | `goqbot_mute_member` | 按消息 ID 禁言 / 解除禁言发送者 | 仅群聊；需要机器人是群管理员；时长不超过「禁言最长时长」 |
+
+> 修改「连接标识」后需要重载插件（或重启 MaiBot），工具的平台范围才会随之更新。
+
+## 开放接口
+
+供其他 MaiBot 插件通过 `ctx.api.call("adapter.goqbot.xxx", ...)` 调用。每组单独开关，**默认全部关闭**，关闭的接口会立即下线。
+参数与 goqbot 同名动作一致（见 [goqbot 文档](https://huilongxiji.github.io/gd-goqbot-docs/)），返回统一为
+`{"success": bool, "retcode": int, "data": ..., "message": str}`。
+
+| 开关 | API | 对应 goqbot 动作 |
+| --- | --- | --- |
+| 消息发送 | `message.send` | `message_type`（group / private）、`target_id`、`message`（段数组或文本）、`mode`：`auto`（默认，按「主动消息」开关处理）/ `passive` / `active` / `wakeup`（仅私聊） |
+| 素材库 | `media.upload_image` / `media.get_image` / `media.list_images` / `media.delete_image` | `upload_media_image` / `get_media_image` / `get_media_images` / `delete_media_image` |
+| 菜单与指令面板 | `panel.get_menu` / `panel.set_menu` / `panel.list` / `panel.get` / `panel.create` / `panel.update` / `panel.delete` / `panel.set_target` | `get_menu` / `set_menu` / `get_command_panels` / `get_command_panel` / `create_command_panel` / `set_command_panel` / `delete_command_panel` / `set_command_panel_target` |
+| 状态查询 | `query.c2c_msg_state` / `query.group_bot_state` / `query.openid` / `query.group_ban` / `query.group_member` / `query.group_members` / `query.group_join_requests` | `get_c2c_msg_state` / `get_group_bot_state` / `get_openid` / `get_group_ban` / `get_group_member_info` / `get_group_member_list` / `get_group_join_requests` |
+| 群管理 | `group.set_ban` / `group.handle_join_request` | `set_group_ban` / `set_group_add_request` |
+| 通用动作透传 | `raw.call_action` | 任意动作：`action`、`params`（字典）。权限最大，只在信任所有已安装插件时开启 |
+
+表中 API 名省略了前缀 `adapter.goqbot.`，例如素材上传的完整名称是 `adapter.goqbot.media.upload_image`：
+
+```python
+result = await self.ctx.api.call(
+    "adapter.goqbot.message.send",
+    message_type="group",
+    target_id=123456,
+    message=[{"type": "markdown", "data": {"data": {"markdown": {"content": "**你好**"}}}}],
+)
+```
+
 ## 建议的 goqbot 设置
 
 - `qq.mention_mode: at`：用户 @ 机器人时 goqbot 会下发 `at` 段（qq=self_id），MaiBot 才能识别「被 @」。
@@ -117,7 +162,7 @@ QQ 官方机器人的回复分为**被动回复**（针对用户刚发的消息�
 | 方向 | 支持 | 说明 |
 | --- | --- | --- |
 | 入站 | 文本、@、引用、图片 | 语音 / 视频 / 文件 / 表情 / 合并转发转为占位文本；notice 事件暂不转发 |
-| 出站 | 文本、@、引用、图片、语音 | 合并转发平铺为普通消息发送 |
+| 出站 | 文本、@、引用、图片、语音 | 合并转发平铺为普通消息发送；Markdown、按钮、图文卡片等通过「聊天工具」或「开放接口」发送 |
 
 群名：goqbot 群事件不带群名，插件会尝试一次 `get_group_info`（白名单接口），失败则使用 `群<group_id>`。
 

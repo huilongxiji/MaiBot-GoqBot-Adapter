@@ -41,6 +41,8 @@ class FakeHost:
         if method == "host.route_message":
             self.routed.append(payload)
             return {"accepted": True}
+        if method == "cap.call":  # 聊天工具 / 开放接口开关同步
+            return {"success": True}
         raise AssertionError(method)
 
 
@@ -113,6 +115,7 @@ async def exercise(plugin, host: FakeHost, logic: FakeGoqbotLogic, push_event, p
     assert ready["platform"] == platform and ready["account_id"] == str(SELF_ID)
     state = await plugin.get_config_widget_state()
     assert state["connection"].tone == "success"
+    assert state["connection"].text == f"QQ {SELF_ID}，goqbot 程序版本 {logic.version}"
 
     # 2) 入站消息被注入，@ 机器人被识别
     await push_event(GROUP_EVENT)

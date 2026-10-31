@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "onebot-ws.goqbot-adapter",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "name": "goqbot 适配器 / GoqBot Adapter",
   "description": "通过 OneBot V11 正向/反向 WebSocket 连接 goqbot（QQ 官方机器人协议端），可与 NoneBot 等框架共用同一个机器人",
   "author": {
@@ -32,7 +32,11 @@
     "max_version": "2.99.99"
   },
   "dependencies": [],
-  "capabilities": [],
+  "capabilities": [
+    "component.disable",
+    "component.enable",
+    "message.get_by_id"
+  ],
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": [

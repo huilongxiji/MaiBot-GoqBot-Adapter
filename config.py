@@ -293,6 +293,153 @@ class MessageConfig(PluginConfigBase):
     )
 
 
+class ToolsConfig(PluginConfigBase):
+    """
+    聊天工具：让 MaiBot 的模型在聊天中调用 goqbot 特有的能力。每项单独开关，默认全部关闭，保存后立即生效。
+    工具只在本连接（连接标识）的会话中出现；修改「连接标识」后需重载插件，工具的平台范围才会更新。
+    """
+
+    __ui_label__: ClassVar[str] = "聊天工具"
+    __ui_icon__: ClassVar[str] = "wrench"
+    __ui_order__: ClassVar[int] = 4
+
+    markdown_enabled: bool = Field(
+        default=False,
+        description="Markdown 消息工具（goqbot_send_markdown）。",
+        json_schema_extra={
+            "label": "Markdown 消息",
+            "hint": "模型可发送原生 Markdown，并可附带跳转 / 指令按钮。发送同样遵循「主动消息」开关。",
+            "order": 0,
+        },
+    )
+    card_enabled: bool = Field(
+        default=False,
+        description="图文卡片工具（goqbot_send_card）。",
+        json_schema_extra={
+            "label": "图文卡片",
+            "hint": "模型可发送带标题、简介、封面图的链接卡片；链接与图片必须是 https。发送同样遵循「主动消息」开关。",
+            "order": 1,
+        },
+    )
+    wakeup_enabled: bool = Field(
+        default=False,
+        description="互动召回工具（goqbot_send_wakeup）。",
+        json_schema_extra={
+            "label": "互动召回",
+            "hint": (
+                "模型可给私聊用户发互动召回消息：用户最后一次私聊后 30 天内分 4 个周期"
+                "（当天 / 1–3 天 / 3–7 天 / 7–30 天），每个周期 1 条。不受「主动消息」开关影响。"
+            ),
+            "order": 2,
+        },
+    )
+    push_state_enabled: bool = Field(
+        default=False,
+        description="主动消息权限查询工具（goqbot_get_push_state）。",
+        json_schema_extra={
+            "label": "主动消息权限查询",
+            "hint": "模型可查询当前群 / 私聊是否允许机器人主动发消息，以及插件的主动消息开关状态。",
+            "order": 3,
+        },
+    )
+    recall_enabled: bool = Field(
+        default=False,
+        description="撤回工具（goqbot_recall_message）。",
+        json_schema_extra={
+            "label": "撤回消息",
+            "hint": "模型可撤回机器人自己发过的消息（QQ 官方只允许撤回机器人自己的消息，且有时间限制）。",
+            "order": 4,
+        },
+    )
+    mute_enabled: bool = Field(
+        default=False,
+        description="禁言工具（goqbot_mute_member），仅群聊。",
+        json_schema_extra={
+            "label": "群成员禁言",
+            "hint": "模型可按消息 ID 禁言 / 解除禁言该消息的发送者。需要机器人在群内具有管理权限。",
+            "order": 5,
+        },
+    )
+    mute_max_sec: int = Field(
+        default=3600,
+        ge=60,
+        le=2592000,
+        description="禁言工具允许的最长禁言时长（秒）。",
+        json_schema_extra={
+            "label": "禁言最长时长（秒）",
+            "hint": "模型给出的时长超过该值时按该值禁言；仅在开启「群成员禁言」时生效。",
+            "order": 6,
+            "step": 60,
+        },
+    )
+
+
+class ApiConfig(PluginConfigBase):
+    """
+    开放接口：供其他 MaiBot 插件通过 ctx.api.call 调用的 goqbot 接口，API 名均以 adapter.goqbot. 开头。
+    每组单独开关，默认全部关闭；关闭的接口会立即下线。参数与返回值与 goqbot 同名动作一致，详见 README。
+    """
+
+    __ui_label__: ClassVar[str] = "开放接口"
+    __ui_icon__: ClassVar[str] = "blocks"
+    __ui_order__: ClassVar[int] = 5
+
+    message_enabled: bool = Field(
+        default=False,
+        description="消息发送接口（adapter.goqbot.message.*）。",
+        json_schema_extra={
+            "label": "消息发送",
+            "hint": "发送任意 goqbot 消息段（Markdown、按钮、卡片、流式等），可选被动 / 主动 / 互动召回 / 自动。",
+            "order": 0,
+        },
+    )
+    media_enabled: bool = Field(
+        default=False,
+        description="素材库接口（adapter.goqbot.media.*）。",
+        json_schema_extra={
+            "label": "素材库",
+            "hint": "上传、查询、删除 goqbot 素材库中的图片（在 Markdown 中用 qqbot-media:// 引用）。",
+            "order": 1,
+        },
+    )
+    panel_enabled: bool = Field(
+        default=False,
+        description="菜单与指令面板接口（adapter.goqbot.panel.*）。",
+        json_schema_extra={
+            "label": "菜单与指令面板",
+            "hint": "读取 / 设置机器人快捷菜单，增删改指令面板。",
+            "order": 2,
+        },
+    )
+    query_enabled: bool = Field(
+        default=False,
+        description="状态查询接口（adapter.goqbot.query.*）。",
+        json_schema_extra={
+            "label": "状态查询",
+            "hint": "查询私聊推送权限、机器人在群内的状态、openid、群禁言列表、群成员与进群申请等。",
+            "order": 3,
+        },
+    )
+    group_admin_enabled: bool = Field(
+        default=False,
+        description="群管理接口（adapter.goqbot.group.*）。",
+        json_schema_extra={
+            "label": "群管理",
+            "hint": "禁言 / 解除禁言群成员、处理进群申请。需要机器人在群内具有管理权限。",
+            "order": 4,
+        },
+    )
+    raw_enabled: bool = Field(
+        default=False,
+        description="通用动作透传接口（adapter.goqbot.raw.call_action）。",
+        json_schema_extra={
+            "label": "通用动作透传",
+            "hint": "允许其他插件直接调用任意 goqbot 动作，权限最大，仅在信任所有已安装插件时开启。",
+            "order": 5,
+        },
+    )
+
+
 class DebugConfig(PluginConfigBase):
     """调试选项。"""
 
@@ -352,6 +499,8 @@ class GoqbotAdapterSettings(PluginConfigBase):
     connection: ConnectionConfig = Field(default_factory=ConnectionConfig)
     active: ActiveMessageConfig = Field(default_factory=ActiveMessageConfig)
     message: MessageConfig = Field(default_factory=MessageConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    api: ApiConfig = Field(default_factory=ApiConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
 
     @model_validator(mode="before")
