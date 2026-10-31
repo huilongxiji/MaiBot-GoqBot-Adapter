@@ -59,7 +59,7 @@ def test_active_section_layout():
 def test_other_sections():
     sections = schema()
     assert [n for n, _ in sorted(sections.items(), key=lambda kv: kv[1]["order"])] == [
-        "plugin", "connection", "active", "message", "tools", "api", "debug",
+        "plugin", "connection", "active", "message", "tools", "mute", "api", "debug",
     ]
     plugin_fields = sections["plugin"]["fields"]
     assert plugin_fields["platform"]["label"] == "连接标识"
@@ -70,12 +70,17 @@ def test_other_sections():
 def test_feature_sections_default_off():
     defaults = plugin_mod.GoqbotAdapterPlugin().get_default_config()
     assert all(v is False for k, v in defaults["tools"].items() if k.endswith("_enabled"))
+    assert defaults["tools"]["wakeup_block_chat_trigger"] is True
+    assert defaults["mute"] == {"trigger_users": [], "protected_users": [], "allowed_groups": [], "max_sec": 3600}
     assert all(v is False for v in defaults["api"].values())
     sections = schema()
     tools = sorted(sections["tools"]["fields"].values(), key=lambda f: f["order"])
     assert [f["label"] for f in tools] == [
-        "Markdown 消息", "图文卡片", "互动召回", "主动消息权限查询", "撤回消息", "群成员禁言", "禁言最长时长（秒）",
+        "Markdown 消息", "图文卡片", "互动召回", "禁止聊天触发召回", "主动消息权限查询", "撤回消息", "群成员禁言",
     ]
+    mute = sorted(sections["mute"]["fields"].values(), key=lambda f: f["order"])
+    assert [f["label"] for f in mute] == ["允许触发的用户", "禁言保护名单", "允许禁言的群", "最长禁言时长（秒）"]
+    assert "留空时禁言工具不会执行" in sections["mute"]["description"]
     api = sorted(sections["api"]["fields"].values(), key=lambda f: f["order"])
     assert [f["label"] for f in api] == ["消息发送", "素材库", "菜单与指令面板", "状态查询", "群管理", "通用动作透传"]
 
@@ -86,6 +91,15 @@ def test_old_config_gets_feature_defaults():
     )
     assert settings.tools.markdown_enabled is False and settings.api.raw_enabled is False
     assert settings.runtime_config_error() == ""
+
+
+def test_migrate_mute_max_sec_from_0_2_0():
+    settings = config.GoqbotAdapterSettings.model_validate(
+        {"plugin": {"config_version": "1.1.0"}, "tools": {"mute_enabled": True, "mute_max_sec": 900}}
+    )
+    assert settings.mute.max_sec == 900 and settings.tools.mute_enabled is True
+    ids = config.MuteConfig(trigger_users=[" qq:123 ", "123", "", "456"], allowed_groups="7，8")
+    assert ids.trigger_users == ["123", "456"] and ids.allowed_groups == ["7", "8"]
 
 
 def test_platform_validation():

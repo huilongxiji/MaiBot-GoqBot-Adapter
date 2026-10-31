@@ -11,11 +11,13 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import asyncio
+import time
 
 from maibot_sdk import Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .codec import OutboundPlan
+from .mute import COMMAND_MAX_AGE_SEC, parse_mute_command
 from .transport import TransportNotConnected
 
 # 工具名 → 配置项（ToolsConfig 上的属性名）
@@ -28,6 +30,8 @@ TOOL_SWITCHES: Dict[str, str] = {
     "goqbot_mute_member": "mute_enabled",
 }
 
+# 互动召回：用户在这段时间内发过消息时视为「聊天触发」（与私聊被动回复窗口一致，期间普通回复即可）
+WAKEUP_QUIET_SEC = 60 * 60
 MAX_BUTTONS = 15
 BUTTONS_PER_ROW = 3
 _BUTTON_TYPES = {"link": 0, "command": 2}
@@ -121,6 +125,22 @@ def build_card(title: Any, description: Any, url: Any, image_url: Any) -> Tuple[
     }, ""
 
 
+def _record_summary(record: Mapping[str, Any]) -> Dict[str, Any]:
+    info = record.get("message_info") if isinstance(record.get("message_info"), Mapping) else {}
+    user = info.get("user_info") if isinstance(info.get("user_info"), Mapping) else {}
+    group = info.get("group_info") if isinstance(info.get("group_info"), Mapping) else {}
+    try:
+        timestamp = float(record.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        timestamp = 0.0
+    return {
+        "user_id": str(user.get("user_id") or "").strip(),
+        "name": str(user.get("user_cardname") or user.get("user_nickname") or user.get("user_id") or "").strip(),
+        "group_id": str(group.get("group_id") or "").strip(),
+        "timestamp": timestamp,
+    }
+
+
 class GoqbotToolsMixin:
     """聊天工具实现；宿主类需提供 ctx、_settings()、_call_action、_sender、_account_id。"""
 
@@ -163,7 +183,7 @@ class GoqbotToolsMixin:
             return _fail(f"{what}发送失败：{result.error}", retcode=result.retcode, mode=result.mode)
         return _done(f"{what}已发送", message_id=result.message_id, mode=result.mode)
 
-    async def _message_sender(self, message_id: str, stream_id: str) -> Optional[Dict[str, str]]:
+    async def _message_sender(self, message_id: str, stream_id: str) -> Optional[Dict[str, Any]]:
         """通过 MaiBot 聊天记录查出某条消息的发送者与所在群。"""
 
         try:
@@ -177,11 +197,27 @@ class GoqbotToolsMixin:
         info = record.get("message_info") if isinstance(record.get("message_info"), Mapping) else {}
         user = info.get("user_info") if isinstance(info.get("user_info"), Mapping) else {}
         group = info.get("group_info") if isinstance(info.get("group_info"), Mapping) else {}
-        return {
-            "user_id": str(user.get("user_id") or "").strip(),
-            "name": str(user.get("user_cardname") or user.get("user_nickname") or user.get("user_id") or "").strip(),
-            "group_id": str(group.get("group_id") or "").strip(),
-        }
+        return _record_summary(record)
+
+    async def _recent_user_message_age(self, stream_id: str, user_id: str) -> Optional[float]:
+        """当前聊天里 user_id 最近一条消息距今的秒数；没有则返回 None，查询失败抛出异常。"""
+
+        messages = await self.ctx.call_capability(  # type: ignore[attr-defined]
+            "message.get_recent", chat_id=stream_id, hours=WAKEUP_QUIET_SEC / 3600, limit=100
+        )
+        if isinstance(messages, Mapping):
+            if not messages.get("success", True):
+                raise RuntimeError(str(messages.get("error") or "查询聊天记录失败"))
+            messages = messages.get("messages")
+        if not isinstance(messages, list):
+            raise RuntimeError("查询聊天记录失败")
+        now = time.time()
+        ages = [
+            now - summary["timestamp"]
+            for summary in (_record_summary(item) for item in messages if isinstance(item, Mapping))
+            if summary["user_id"] == user_id and summary["timestamp"]
+        ]
+        return min(ages) if ages else None
 
     # ── 消息类 ──────────────────────────────────────────────────
 
@@ -257,30 +293,38 @@ class GoqbotToolsMixin:
     @Tool(
         "goqbot_send_wakeup",
         description=(
-            "给一位 QQ 私聊用户发送互动召回消息，用于提醒很久没来聊天的用户。只能发给 30 天内私聊过机器人的用户，"
+            "给当前私聊的用户发送一条互动召回消息，用于在用户很久没来聊天时由你主动问候、提醒。"
+            "只能召回当前聊天的用户；用户正在聊天或要求你发召回消息时不要使用，直接正常回复即可。"
             "30 天内分 4 个周期（当天 / 1–3 天 / 3–7 天 / 7–30 天）每周期只能发 1 条，请谨慎使用。"
         ),
         parameters=[
             ToolParameterInfo(name="content", param_type=ToolParamType.STRING, description="要发送的文字。"),
-            ToolParameterInfo(
-                name="target_user_id", param_type=ToolParamType.STRING, required=False,
-                description="私聊用户的 user_id；在私聊中调用时可不填，默认发给当前用户。",
-            ),
         ],
+        chat_scope="private",
         enabled=False,
     )
-    async def tool_send_wakeup(self, content: str = "", target_user_id: Any = "", **context: Any) -> Dict[str, Any]:
+    async def tool_send_wakeup(self, content: str = "", **context: Any) -> Dict[str, Any]:
         if denied := self._tool_guard("goqbot_send_wakeup", context):
             return denied
         text = str(content or "").strip()
         if not text:
             return _fail("content 不能为空")
-        user_id = _to_int(target_user_id)
-        if user_id is None:
-            chat_type, current = self._chat_target(context)
-            if chat_type != "private" or current is None:
-                return _fail("请提供 target_user_id（私聊用户的 user_id）")
-            user_id = current
+        chat_type, user_id = self._chat_target(context)
+        if chat_type != "private" or user_id is None:
+            return _fail("互动召回只能在私聊中使用，且只能召回当前聊天的用户")
+        if self._settings().tools.wakeup_block_chat_trigger:  # type: ignore[attr-defined]
+            stream_id = str(context.get("stream_id") or context.get("chat_id") or "")
+            if not stream_id:
+                return _fail("无法确认当前聊天，已拒绝召回")
+            try:
+                age = await self._recent_user_message_age(stream_id, str(user_id))
+            except Exception as exc:  # noqa: BLE001 - 查不到就按聊天触发处理，宁可不发
+                return _fail(f"无法确认用户最近是否在聊天（{exc}），已拒绝召回")
+            if age is not None:
+                return _fail(
+                    f"用户 {int(age // 60)} 分钟前刚在聊天中发过消息，互动召回只能在用户长时间未互动时由 AI 自行发起，"
+                    "请直接正常回复"
+                )
         response = await self._tool_call(
             "send_private_msg",
             {"user_id": user_id, "message": [{"type": "text", "data": {"text": text}}], "is_wakeup": True},
@@ -288,7 +332,7 @@ class GoqbotToolsMixin:
         if not _response_ok(response):
             return _fail(f"互动召回发送失败：{_response_error(response)}")
         data = response.get("data") if isinstance(response.get("data"), Mapping) else {}
-        return _done(f"已向用户 {user_id} 发送互动召回消息", message_id=str(data.get("message_id") or ""))
+        return _done("已向当前用户发送互动召回消息", message_id=str(data.get("message_id") or ""))
 
     # ── 查询 / 管理类 ───────────────────────────────────────────
 
@@ -364,51 +408,68 @@ class GoqbotToolsMixin:
     @Tool(
         "goqbot_mute_member",
         description=(
-            "在当前 QQ 群中按消息 ID 禁言该消息的发送者，duration=0 表示解除禁言。"
-            "仅在刷屏、违规或用户主动要求时使用；需要机器人是群管理员。"
+            "执行群里管理员发出的禁言 / 解禁指令。只有当某人发出以「禁言」「解禁」或「解除禁言」开头并 @ 了一位成员的指令"
+            "（如「禁言 @某人 10分钟」「解禁 @某人」）时才调用，并传入这条指令消息的 ID；"
+            "禁言对象、时长和是否有权限都由插件按指令原文判断，不要自行决定禁言任何人。"
         ),
         parameters=[
             ToolParameterInfo(
-                name="message_id", param_type=ToolParamType.STRING,
-                description="目标用户发送的消息 ID（聊天记录中的消息 ID）。",
-            ),
-            ToolParameterInfo(
-                name="duration", param_type=ToolParamType.INTEGER,
-                description="禁言时长（秒），0 表示解除禁言；超过配置上限时按上限处理。",
+                name="command_message_id", param_type=ToolParamType.STRING,
+                description="禁言 / 解禁指令那条消息的 ID（聊天记录中的消息 ID）。",
             ),
         ],
         chat_scope="group",
         enabled=False,
     )
-    async def tool_mute_member(self, message_id: Any = "", duration: Any = 0, **context: Any) -> Dict[str, Any]:
+    async def tool_mute_member(self, command_message_id: Any = "", **context: Any) -> Dict[str, Any]:
         if denied := self._tool_guard("goqbot_mute_member", context):
             return denied
+        rules = self._settings().mute  # type: ignore[attr-defined]
         chat_type, group_id = self._chat_target(context)
         if chat_type != "group" or not group_id:
             return _fail("禁言只能在群聊中使用")
-        try:
-            seconds = max(0, int(duration or 0))
-        except (TypeError, ValueError):
-            return _fail("duration 必须是整数秒")
-        seconds = min(seconds, self._settings().tools.mute_max_sec)  # type: ignore[attr-defined]
-        msg_id = str(message_id or "").strip()
-        if not msg_id:
-            return _fail("缺少 message_id")
-        stream_id = str(context.get("stream_id") or context.get("chat_id") or "")
-        sender = await self._message_sender(msg_id, stream_id)
-        if not sender or not sender["user_id"]:
-            return _fail(f"在当前聊天记录中找不到消息 {msg_id}")
-        if sender["group_id"] and sender["group_id"] != str(group_id):
-            return _fail("该消息不在当前群")
-        if sender["user_id"] == self._account_id:  # type: ignore[attr-defined]
-            return _fail("不能禁言机器人自己")
-        user_id = _to_int(sender["user_id"])
+        if rules.allowed_groups and str(group_id) not in rules.allowed_groups:
+            return _fail("当前群不在允许禁言的群名单中")
+        if not rules.trigger_users:
+            return _fail("未配置允许触发禁言的用户，禁言工具不会执行")
+
+        # 指令必须是插件亲自收到的、本群、白名单用户在有效期内发出且未执行过的消息
+        command_id = str(command_message_id or "").strip()
+        if not command_id:
+            return _fail("缺少 command_message_id（禁言指令消息的 ID）")
+        cached = self._group_messages.get(command_id)  # type: ignore[attr-defined]
+        if cached is None:
+            return _fail(f"消息 {command_id} 不是插件近 {COMMAND_MAX_AGE_SEC // 60} 分钟内收到的群消息，已拒绝")
+        if cached.group_id != str(group_id):
+            return _fail("指令消息不在当前群")
+        if cached.user_id not in rules.trigger_users:
+            return _fail("发出指令的用户不在「允许触发的用户」名单中，已拒绝")
+        if cached.consumed:
+            return _fail("这条指令已经执行过，不能重复执行")
+        command, reason = parse_mute_command(cached.segments, str(self._account_id))  # type: ignore[attr-defined]
+        if command is None:
+            return _fail(f"消息 {command_id} 不是有效的禁言指令：{reason}")
+
+        target = command.target_id
+        user_id = _to_int(target)
         if user_id is None:
-            return _fail("消息发送者 ID 无效")
+            return _fail("指令中 @ 的成员 ID 无效")
+        if target == self._account_id:  # type: ignore[attr-defined]
+            return _fail("不能禁言机器人自己")
+        if command.action == "mute" and target in rules.protected_users:
+            return _fail("该用户在禁言保护名单中，不会被禁言")
+        seconds = min(command.duration, rules.max_sec)
+        cached.consumed = True
         response = await self._tool_call("set_group_ban", {"group_id": group_id, "user_id": user_id, "duration": seconds})
         if not _response_ok(response):
+            cached.consumed = False
             return _fail(f"禁言失败：{_response_error(response)}")
-        who = sender["name"] or str(user_id)
+        who = command.target_name or str(user_id)
+        self.ctx.logger.info(  # type: ignore[attr-defined]
+            f"[goqbot] 禁言工具：群 {group_id} 用户 {cached.user_id} 的指令（消息 {command_id}），"
+            f"{'解除禁言' if seconds == 0 else f'禁言 {seconds} 秒'} {who}（{user_id}）"
+        )
         if seconds == 0:
             return _done(f"已解除 {who} 的禁言", user_id=str(user_id))
-        return _done(f"已禁言 {who} {seconds} 秒", user_id=str(user_id), duration=seconds)
+        note = f"（指令时长超过上限，按 {rules.max_sec} 秒）" if command.duration > seconds else ""
+        return _done(f"已禁言 {who} {seconds} 秒{note}", user_id=str(user_id), duration=seconds)

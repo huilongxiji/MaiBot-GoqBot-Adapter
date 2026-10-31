@@ -21,6 +21,7 @@ from maibot_sdk import ConfigWidget, ConfigWidgetState, MaiBotPlugin, MessageGat
 
 from .apis import GoqbotApisMixin
 from .codec import InboundCodec, OutboundCodec
+from .mute import RecentGroupMessages
 from .config import GoqbotAdapterSettings
 from .constants import GATEWAY_NAME, GATEWAY_PROTOCOL, PASSIVE_ONLY_MIN_GOQBOT_VERSION
 from .sender import OutboundSender
@@ -72,6 +73,8 @@ class GoqbotAdapterPlugin(GoqbotToolsMixin, GoqbotApisMixin, MaiBotPlugin):
         self._group_names: Dict[str, str] = {}
         self._group_info_supported: Optional[bool] = None
         self._last_error: str = ""
+        # 禁言指令只认插件亲自收到的原始群消息（见 mute.py）
+        self._group_messages = RecentGroupMessages()
 
     # ── 生命周期 ────────────────────────────────────────────────
 
@@ -262,6 +265,7 @@ class GoqbotAdapterPlugin(GoqbotToolsMixin, GoqbotApisMixin, MaiBotPlugin):
                 await http.close()
         self._group_names.clear()
         self._group_info_supported = None
+        self._group_messages.clear()
 
     async def _call_action(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         transport = self._transport
@@ -339,6 +343,13 @@ class GoqbotAdapterPlugin(GoqbotToolsMixin, GoqbotApisMixin, MaiBotPlugin):
         if account_id is None or platform is None:
             self.ctx.logger.debug("[goqbot] 网关尚未就绪，丢弃一条消息")
             return
+        if str(payload.get("message_type") or "") == "group":
+            self._group_messages.add(
+                str(payload.get("message_id") or "").strip(),
+                str(payload.get("group_id") or "").strip(),
+                str(payload.get("user_id") or "").strip(),
+                payload.get("message"),
+            )
         settings = self._settings()
         result = await self._inbound.build(
             payload, platform=platform, account_id=account_id, download_images=settings.message.download_images

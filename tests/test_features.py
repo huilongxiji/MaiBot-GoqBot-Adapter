@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import asyncio
+import time
 
 from maibot_sdk.context import PluginContext
 
@@ -13,6 +14,7 @@ from conftest import load
 plugin_mod = load("plugin")
 constants = load("constants")
 tools_mod = load("tools")
+mute_mod = load("mute")
 
 SELF_ID = "10001"
 
@@ -21,6 +23,7 @@ class FakeHost:
     def __init__(self) -> None:
         self.caps: List[Dict[str, Any]] = []
         self.messages: Dict[str, Dict[str, Any]] = {}
+        self.recent: Any = []
 
     async def rpc(self, method: str, plugin_id: str, payload: Dict[str, Any], **_: Any) -> Any:
         assert method == "cap.call", method
@@ -28,6 +31,10 @@ class FakeHost:
         self.caps.append({"capability": cap, **args})
         if cap == "message.get_by_id":
             return {"success": True, "message": self.messages.get(args["message_id"])}
+        if cap == "message.get_recent":
+            if isinstance(self.recent, Exception):
+                return {"success": False, "error": str(self.recent)}
+            return {"success": True, "messages": self.recent}
         return {"success": True}
 
 
@@ -46,7 +53,8 @@ class FakeTransport:
         return None
 
 
-def make(tools: Dict[str, Any] | None = None, api: Dict[str, Any] | None = None, platform: str = "qq"):
+def make(tools: Dict[str, Any] | None = None, api: Dict[str, Any] | None = None, platform: str = "qq",
+         mute: Dict[str, Any] | None = None):
     host = FakeHost()
     plugin = plugin_mod.GoqbotAdapterPlugin()
     plugin._set_context(PluginContext(constants.PLUGIN_ID, rpc_call=host.rpc))
@@ -54,6 +62,7 @@ def make(tools: Dict[str, Any] | None = None, api: Dict[str, Any] | None = None,
     cfg["plugin"]["platform"] = platform
     cfg["tools"].update(tools or {})
     cfg["api"].update(api or {})
+    cfg["mute"].update(mute or {})
     plugin.set_plugin_config(cfg)
     transport = FakeTransport()
     plugin._transport = transport
@@ -67,6 +76,13 @@ PRIVATE_CTX = {"stream_id": "s2", "user_id": "3003", "platform": "qq"}
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def _record(user_id: str, group_id: str = "2002", ts: float | None = None) -> Dict[str, Any]:
+    info: Dict[str, Any] = {"user_info": {"user_id": user_id, "user_nickname": "小明"}}
+    if group_id:
+        info["group_info"] = {"group_id": group_id}
+    return {"timestamp": str(time.time() if ts is None else ts), "message_info": info}
 
 
 # ── 注册与开关 ──────────────────────────────────────────────────
@@ -165,15 +181,35 @@ def test_send_card():
                                              "url": "https://a", "pic_url": "https://b/c.png"}}
 
 
-def test_send_wakeup():
-    plugin, _, transport = make(tools={"wakeup_enabled": True})
+def test_send_wakeup_only_current_user_and_not_chat_triggered():
+    plugin, host, transport = make(tools={"wakeup_enabled": True})
+    # 群聊里不能用，也不能指定别人
     assert run(plugin.tool_send_wakeup(content="在吗", **GROUP_CTX))["success"] is False
+    tools = {c["name"]: c for c in plugin.get_components() if c["type"] == "TOOL"}
+    assert tools["goqbot_send_wakeup"]["chat_scope"] == "private"
+    assert [p["name"] for p in tools["goqbot_send_wakeup"]["metadata"]["parameters"]] == ["content"]
+    # 用户 5 分钟前刚说过话 → 视为聊天触发，拒绝
+    host.recent = [_record("3003", group_id="", ts=time.time() - 300), _record(SELF_ID, group_id="")]
     result = run(plugin.tool_send_wakeup(content="在吗", **PRIVATE_CTX))
-    assert result["success"]
+    assert result["success"] is False and "5 分钟前" in result["error"]
+    # 查询失败时宁可不发
+    host.recent = RuntimeError("db down")
+    assert run(plugin.tool_send_wakeup(content="在吗", **PRIVATE_CTX))["success"] is False
+    assert transport.calls == []
+    # 最近 60 分钟只有机器人自己的消息 → AI 自行发起，允许
+    host.recent = [_record(SELF_ID, group_id="")]
+    assert run(plugin.tool_send_wakeup(content="好久不见", target_user_id="4004", **PRIVATE_CTX))["success"]
     assert transport.calls[-1] == {"action": "send_private_msg", "params": {
-        "user_id": 3003, "message": [{"type": "text", "data": {"text": "在吗"}}], "is_wakeup": True}}
-    run(plugin.tool_send_wakeup(content="hi", target_user_id="4004", **GROUP_CTX))
-    assert transport.calls[-1]["params"]["user_id"] == 4004
+        "user_id": 3003, "message": [{"type": "text", "data": {"text": "好久不见"}}], "is_wakeup": True}}
+    recent_call = [c for c in host.caps if c["capability"] == "message.get_recent"][-1]
+    assert recent_call["chat_id"] == "s2" and recent_call["hours"] == 1
+
+
+def test_wakeup_chat_trigger_check_can_be_disabled():
+    plugin, host, transport = make(tools={"wakeup_enabled": True, "wakeup_block_chat_trigger": False})
+    host.recent = [_record("3003", group_id="", ts=time.time())]
+    assert run(plugin.tool_send_wakeup(content="hi", **PRIVATE_CTX))["success"]
+    assert not any(c["capability"] == "message.get_recent" for c in host.caps)
 
 
 def test_push_state():
@@ -188,11 +224,6 @@ def test_push_state():
     assert result["success"] and result["allow_proactive_msg"] is None and "未知" in result["content"]
 
 
-def _record(user_id: str, group_id: str = "2002") -> Dict[str, Any]:
-    return {"message_info": {"user_info": {"user_id": user_id, "user_nickname": "小明"},
-                             "group_info": {"group_id": group_id}}}
-
-
 def test_recall_only_own_messages():
     plugin, host, transport = make(tools={"recall_enabled": True})
     host.messages["55"] = _record("3003")
@@ -203,20 +234,133 @@ def test_recall_only_own_messages():
     assert run(plugin.tool_recall_message(message_id="abc", **GROUP_CTX))["success"] is False
 
 
-def test_mute_member():
-    plugin, host, transport = make(tools={"mute_enabled": True, "mute_max_sec": 600})
-    host.messages["60"] = _record("3003")
-    result = run(plugin.tool_mute_member(message_id="60", duration=99999, **GROUP_CTX))
-    assert result["success"] and result["duration"] == 600 and "小明" in result["content"]
+MUTE_RULES = {"trigger_users": ["8008"], "max_sec": 600}
+
+
+def _cmd(*parts):
+    """构造原始消息段：字符串为文本，("at", qq) 为 @。"""
+
+    segs = []
+    for part in parts:
+        if isinstance(part, tuple):
+            segs.append({"type": "at", "data": {"qq": part[1], "name": "小明" if part[1] == "3003" else ""}})
+        else:
+            segs.append({"type": "text", "data": {"text": part}})
+    return segs
+
+
+def _bans(transport):
+    return [c for c in transport.calls if c["action"] == "set_group_ban"]
+
+
+def _mute(plugin, command_id, ctx=GROUP_CTX):
+    return run(plugin.tool_mute_member(command_message_id=command_id, **ctx))
+
+
+def test_parse_mute_command():
+    parse = mute_mod.parse_mute_command
+    ok = lambda segs: parse(segs, SELF_ID)[0]  # noqa: E731
+    assert ok(_cmd(("at", SELF_ID), " 禁言 ", ("at", "3003"), " 10分钟")) == mute_mod.MuteCommand("mute", "3003", "小明", 600)
+    assert ok(_cmd("/禁言", ("at", "3003"))).duration == mute_mod.DEFAULT_MUTE_SEC
+    assert ok(_cmd("禁言", ("at", "3003"), "2小时")).duration == 7200
+    assert ok(_cmd("禁言", ("at", "3003"), "30")).duration == 1800
+    assert ok(_cmd("禁言", ("at", "3003"), "45s")).duration == 45
+    assert ok(_cmd("解除禁言", ("at", "3003"))).action == "unmute"
+    assert ok(_cmd("解禁 ", ("at", "3003"))) == mute_mod.MuteCommand("unmute", "3003", "小明", 0)
+    for segs in (
+        _cmd("别禁言", ("at", "3003")),  # 不是以关键词开头
+        _cmd("他刷屏了，禁言他吧", ("at", "3003")),
+        _cmd("禁言"),  # 没有 @
+        _cmd("禁言", ("at", "3003"), ("at", "4004")),  # @ 了两个人
+        _cmd("禁言", ("at", "3003"), "一会儿"),  # 时长无法识别
+        _cmd("禁言", ("at", "3003"), "0分钟"),
+        _cmd("解禁", ("at", "3003"), "顺便禁言别人"),
+        _cmd("禁言", ("at", "all")),
+        _cmd("禁言", ("at", SELF_ID)),
+        [{"type": "image", "data": {}}, *_cmd("禁言", ("at", "3003"))],
+    ):
+        command, reason = parse(segs, SELF_ID)
+        assert command is None and reason, segs
+
+
+def _feed(plugin, message_id, user_id, segs, group_id=2002):
+    run(plugin._on_event({"post_type": "message", "message_type": "group", "message_id": message_id,
+                          "group_id": group_id, "user_id": user_id, "message": segs}))
+
+
+def make_mute(**rules):
+    plugin, host, transport = make(tools={"mute_enabled": True}, mute={**MUTE_RULES, **rules})
+    plugin._platform = "qq"
+    plugin.ctx.gateway.route_message = _noop_route
+    return plugin, host, transport
+
+
+async def _noop_route(*args, **kwargs):
+    return True
+
+
+def test_mute_member_executes_whitelisted_command():
+    plugin, _, transport = make_mute()
+    _feed(plugin, 70, 8008, _cmd(("at", SELF_ID), " 禁言 ", ("at", "3003"), " 2小时"))
+    result = _mute(plugin, "70")
+    assert result["success"] and result["duration"] == 600 and "上限" in result["content"] and "小明" in result["content"]
     assert transport.calls[-1] == {"action": "set_group_ban",
                                    "params": {"group_id": 2002, "user_id": 3003, "duration": 600}}
-    result = run(plugin.tool_mute_member(message_id="60", duration=0, **GROUP_CTX))
-    assert "解除" in result["content"]
-    host.messages["61"] = _record(SELF_ID)
-    assert run(plugin.tool_mute_member(message_id="61", duration=60, **GROUP_CTX))["success"] is False
-    host.messages["62"] = _record("3003", group_id="9999")
-    assert "不在当前群" in run(plugin.tool_mute_member(message_id="62", duration=60, **GROUP_CTX))["error"]
-    assert run(plugin.tool_mute_member(message_id="404", duration=60, **GROUP_CTX))["success"] is False
+    # 同一条指令不能重复执行
+    assert "已经执行过" in _mute(plugin, "70")["error"]
+    _feed(plugin, 71, 8008, _cmd("解禁", ("at", "3003")))
+    result = _mute(plugin, "71")
+    assert result["success"] and "解除" in result["content"]
+    assert transport.calls[-1]["params"]["duration"] == 0
+
+
+def test_mute_member_rejects_everything_else():
+    plugin, _, transport = make_mute()
+    _feed(plugin, 80, 3003, _cmd("禁言", ("at", "4004")))  # 普通用户发的指令
+    _feed(plugin, 81, 8008, _cmd("今天谁刷屏了？", ("at", "3003")))  # 管理员的无关消息
+    _feed(plugin, 82, 8008, _cmd("禁言", ("at", "3003")), group_id=9999)  # 管理员在别的群
+    _feed(plugin, 83, 8008, _cmd("禁言", ("at", SELF_ID)))
+    cases = {"": "缺少", "80": "允许触发", "81": "不是有效的禁言指令", "82": "不在当前群",
+             "83": "不是有效的禁言指令", "999": "不是插件近"}
+    for command_id, needle in cases.items():
+        result = _mute(plugin, command_id)
+        assert result["success"] is False and needle in result["error"], (command_id, result)
+    assert not _bans(transport)
+
+
+def test_mute_command_expires():
+    plugin, _, transport = make_mute()
+    _feed(plugin, 70, 8008, _cmd("禁言", ("at", "3003")))
+    item = plugin._group_messages.get("70")
+    item.received_at -= mute_mod.COMMAND_MAX_AGE_SEC + 1
+    assert "不是插件近" in _mute(plugin, "70")["error"] and not _bans(transport)
+
+
+def test_mute_empty_whitelist_blocks_all():
+    plugin, _, transport = make_mute(trigger_users=[])
+    _feed(plugin, 70, 8008, _cmd("禁言", ("at", "3003")))
+    result = _mute(plugin, "70")
+    assert result["success"] is False and "未配置" in result["error"] and not _bans(transport)
+
+
+def test_mute_protected_users_and_allowed_groups():
+    plugin, _, transport = make_mute(protected_users=["qq:3003"], allowed_groups=["5005"])
+    _feed(plugin, 70, 8008, _cmd("禁言", ("at", "3003")))
+    _feed(plugin, 71, 8008, _cmd("解禁", ("at", "3003")))
+    assert "允许禁言的群" in _mute(plugin, "70")["error"]
+    plugin.config.mute.allowed_groups = ["2002"]
+    assert "保护名单" in _mute(plugin, "70")["error"]
+    assert not _bans(transport)
+    assert _mute(plugin, "71")["success"]  # 保护名单不影响解除禁言
+
+
+def test_mute_failure_allows_retry():
+    plugin, _, transport = make_mute()
+    transport.responses["set_group_ban"] = {"status": "failed", "retcode": 1500, "message": "无权限"}
+    _feed(plugin, 70, 8008, _cmd("禁言", ("at", "3003")))
+    assert "无权限" in _mute(plugin, "70")["error"]
+    del transport.responses["set_group_ban"]
+    assert _mute(plugin, "70")["success"]
 
 
 # ── 开放接口 ────────────────────────────────────────────────────

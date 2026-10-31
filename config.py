@@ -323,14 +323,26 @@ class ToolsConfig(PluginConfigBase):
     )
     wakeup_enabled: bool = Field(
         default=False,
-        description="互动召回工具（goqbot_send_wakeup）。",
+        description="互动召回工具（goqbot_send_wakeup），仅私聊。",
         json_schema_extra={
             "label": "互动召回",
             "hint": (
-                "模型可给私聊用户发互动召回消息：用户最后一次私聊后 30 天内分 4 个周期"
+                "模型可给当前私聊的用户发互动召回消息，只能召回当前聊天的用户。用户最后一次私聊后 30 天内分 4 个周期"
                 "（当天 / 1–3 天 / 3–7 天 / 7–30 天），每个周期 1 条。不受「主动消息」开关影响。"
             ),
             "order": 2,
+        },
+    )
+    wakeup_block_chat_trigger: bool = Field(
+        default=True,
+        description="禁止通过聊天触发互动召回。",
+        json_schema_extra={
+            "label": "禁止聊天触发召回",
+            "hint": (
+                "默认开启：用户最近 60 分钟内在该私聊发过消息时拒绝召回，召回只能由 AI 在用户长时间未互动时自行发起，"
+                "用户无法通过聊天让机器人发召回消息（60 分钟内普通回复本就可用）。"
+            ),
+            "order": 3,
         },
     )
     push_state_enabled: bool = Field(
@@ -339,7 +351,7 @@ class ToolsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "主动消息权限查询",
             "hint": "模型可查询当前群 / 私聊是否允许机器人主动发消息，以及插件的主动消息开关状态。",
-            "order": 3,
+            "order": 4,
         },
     )
     recall_enabled: bool = Field(
@@ -348,7 +360,7 @@ class ToolsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "撤回消息",
             "hint": "模型可撤回机器人自己发过的消息（QQ 官方只允许撤回机器人自己的消息，且有时间限制）。",
-            "order": 4,
+            "order": 5,
         },
     )
     mute_enabled: bool = Field(
@@ -356,22 +368,85 @@ class ToolsConfig(PluginConfigBase):
         description="禁言工具（goqbot_mute_member），仅群聊。",
         json_schema_extra={
             "label": "群成员禁言",
-            "hint": "模型可按消息 ID 禁言 / 解除禁言该消息的发送者。需要机器人在群内具有管理权限。",
-            "order": 5,
+            "hint": "执行「允许触发的用户」发出的禁言 / 解禁指令（格式见「禁言工具」分组），模型不能自行禁言任何人。需要机器人是群管理员。",
+            "order": 6,
         },
     )
-    mute_max_sec: int = Field(
+
+
+def _id_list(value: Any) -> list:
+    """规范化 ID 列表：去空白、去重，兼容 ``qq:123`` 写法。"""
+
+    if value is None:
+        return []
+    items = value if isinstance(value, (list, tuple, set)) else str(value).replace("，", ",").split(",")
+    result: list = []
+    for item in items:
+        text = _text(item)
+        if ":" in text:
+            text = text.rsplit(":", 1)[1].strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+class MuteConfig(PluginConfigBase):
+    """
+    禁言工具的安全限制（需先在「聊天工具」中开启「群成员禁言」）。
+    只执行「允许触发的用户」本人发出的指令：「禁言 @某人 时长」或「解禁 @某人」（时长如 30秒 / 10分钟 / 2小时 / 1天，纯数字按分钟，不写默认 10 分钟）。
+    禁言对象和时长只从指令原文解析，模型无法指定；指令需在 10 分钟内、且只能执行一次。名单留空时禁言工具不会执行任何操作。
+    名单填 goqbot 下发的数字 user_id / group_id；同一个人在私聊和不同群中的 user_id 可能不同，请按该群聊天记录中显示的 ID 填写。
+    @ 成员需要 goqbot 设置 qq.mention_mode: at。
+    """
+
+    __ui_label__: ClassVar[str] = "禁言工具"
+    __ui_icon__: ClassVar[str] = "shield"
+    __ui_order__: ClassVar[int] = 5
+
+    trigger_users: list[str] = Field(
+        default_factory=list,
+        description="允许通过聊天触发禁言的用户（白名单）。",
+        json_schema_extra={
+            "label": "允许触发的用户",
+            "hint": "只有名单内用户本人发出的禁言 / 解禁指令会被执行；留空表示任何人都无法触发禁言。",
+            "order": 0,
+        },
+    )
+    protected_users: list[str] = Field(
+        default_factory=list,
+        description="禁言保护名单：名单里的人不会被禁言。",
+        json_schema_extra={
+            "label": "禁言保护名单",
+            "hint": "名单内的用户永远不会被禁言（解除禁言不受影响）。建议把群主、管理员加入。",
+            "order": 1,
+        },
+    )
+    allowed_groups: list[str] = Field(
+        default_factory=list,
+        description="允许禁言的群，留空表示所有群都可用。",
+        json_schema_extra={
+            "label": "允许禁言的群",
+            "hint": "填写 group_id；留空表示所有群都可用。",
+            "order": 2,
+        },
+    )
+    max_sec: int = Field(
         default=3600,
         ge=60,
         le=2592000,
         description="禁言工具允许的最长禁言时长（秒）。",
         json_schema_extra={
-            "label": "禁言最长时长（秒）",
-            "hint": "模型给出的时长超过该值时按该值禁言；仅在开启「群成员禁言」时生效。",
-            "order": 6,
+            "label": "最长禁言时长（秒）",
+            "hint": "指令中的时长超过该值时按该值禁言。",
+            "order": 3,
             "step": 60,
         },
     )
+
+    @field_validator("trigger_users", "protected_users", "allowed_groups", mode="before")
+    @classmethod
+    def _normalize_ids(cls, value: Any) -> list:
+        return _id_list(value)
 
 
 class ApiConfig(PluginConfigBase):
@@ -382,7 +457,7 @@ class ApiConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "开放接口"
     __ui_icon__: ClassVar[str] = "blocks"
-    __ui_order__: ClassVar[int] = 5
+    __ui_order__: ClassVar[int] = 6
 
     message_enabled: bool = Field(
         default=False,
@@ -492,6 +567,20 @@ def _migrate_v1_0(raw: Dict[str, Any]) -> None:
         conn["address"] = forward_url
 
 
+def _migrate_v0_2_0(raw: Dict[str, Any]) -> None:
+    """0.2.0 的 tools.mute_max_sec 移到 0.2.1 新增的「禁言工具」分组（mute.max_sec）。"""
+
+    tools = raw.get("tools")
+    if not isinstance(tools, dict) or "mute_max_sec" not in tools:
+        return
+    legacy = tools.pop("mute_max_sec")
+    mute = raw.get("mute")
+    if not isinstance(mute, dict):
+        mute = raw["mute"] = {}
+    if "max_sec" not in mute or mute.get("max_sec") in (None, 3600):
+        mute["max_sec"] = legacy
+
+
 class GoqbotAdapterSettings(PluginConfigBase):
     """goqbot 适配器完整配置。"""
 
@@ -500,6 +589,7 @@ class GoqbotAdapterSettings(PluginConfigBase):
     active: ActiveMessageConfig = Field(default_factory=ActiveMessageConfig)
     message: MessageConfig = Field(default_factory=MessageConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    mute: MuteConfig = Field(default_factory=MuteConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
 
@@ -510,6 +600,7 @@ class GoqbotAdapterSettings(PluginConfigBase):
             return raw
         data: Dict[str, Any] = {k: (dict(v) if isinstance(v, Mapping) else v) for k, v in raw.items()}
         _migrate_v1_0(data)
+        _migrate_v0_2_0(data)
         plugin = data.get("plugin")
         if isinstance(plugin, dict) and _text(plugin.get("config_version")) in {"1.0.0"}:
             plugin["config_version"] = SUPPORTED_CONFIG_VERSION
