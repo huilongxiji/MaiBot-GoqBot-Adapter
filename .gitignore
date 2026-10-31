@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+config.toml
+config.toml.backup*
+data/
+logs/
+.DS_Store
+.idea/
+.vscode/
