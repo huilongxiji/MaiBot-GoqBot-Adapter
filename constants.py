@@ -4,14 +4,15 @@ PLUGIN_ID = "onebot-ws.goqbot-adapter"
 GATEWAY_NAME = "goqbot_gateway"
 GATEWAY_PROTOCOL = "onebot11-goqbot"
 
-# 配置结构版本：结构有不兼容变化时递增。
-SUPPORTED_CONFIG_VERSION = "1.0.0"
+# 配置结构版本：结构有不兼容变化时递增（旧版本配置由 config.py 自动迁移）。
+SUPPORTED_CONFIG_VERSION = "1.1.0"
 
 DEFAULT_PLATFORM = "qq"
-DEFAULT_FORWARD_URL = "ws://127.0.0.1:6700"
-DEFAULT_REVERSE_HOST = "127.0.0.1"
-DEFAULT_REVERSE_PORT = 8095
-DEFAULT_REVERSE_PATH = "/onebot/v11/ws"
+
+# 连接方式取值即配置页下拉框里显示的文字。
+MODE_FORWARD = "正向"
+MODE_REVERSE = "反向"
+DEFAULT_ADDRESS = "ws://127.0.0.1:6700"
 DEFAULT_RECONNECT_DELAY_SEC = 5.0
 DEFAULT_HEARTBEAT_INTERVAL_SEC = 30.0
 DEFAULT_ACTION_TIMEOUT_SEC = 30.0

@@ -82,12 +82,14 @@ GROUP_EVENT = {
 }
 
 
-def make_plugin(host: FakeHost, connection: Dict[str, Any], active: Dict[str, Any] | None = None):
+def make_plugin(host: FakeHost, connection: Dict[str, Any], active: Dict[str, Any] | None = None,
+                platform: str = "qq"):
     plugin = plugin_mod.GoqbotAdapterPlugin()
     plugin._set_context(PluginContext(constants.PLUGIN_ID, rpc_call=host.rpc))
     cfg = plugin.get_default_config()
     cfg["plugin"]["enabled"] = True
-    cfg["connection"].update({"access_token": TOKEN, "reconnect_delay_sec": 0.2, "action_timeout_sec": 3,
+    cfg["plugin"]["platform"] = platform
+    cfg["connection"].update({"access_token": TOKEN, "reconnect_delay_sec": 1, "action_timeout_sec": 3,
                               **connection})
     if active:
         cfg["active"].update(active)
@@ -166,7 +168,7 @@ def test_forward_mode_end_to_end():
         await web.TCPSite(runner, "127.0.0.1", port).start()
 
         host = FakeHost()
-        plugin = make_plugin(host, {"mode": "forward", "forward_url": f"ws://127.0.0.1:{port}"})
+        plugin = make_plugin(host, {"mode": "正向", "address": f"ws://127.0.0.1:{port}"})
         await plugin.on_load()
         try:
             async def push(ev):
@@ -196,7 +198,8 @@ def test_reverse_mode_end_to_end_with_custom_platform_and_active():
         port = free_port()
         plugin = make_plugin(
             host,
-            {"mode": "reverse", "reverse_host": "127.0.0.1", "reverse_port": port, "platform": "qq_official"},
+            {"mode": "反向", "address": f"ws://127.0.0.1:{port}/onebot/v11/ws"},
+            platform="qq_official",
         )
         await plugin.on_load()
         session = aiohttp.ClientSession()
@@ -281,7 +284,7 @@ def test_bootstrap_failure_disconnects_and_retries():
         port = free_port()
         await web.TCPSite(runner, "127.0.0.1", port).start()
         host = FakeHost()
-        plugin = make_plugin(host, {"mode": "forward", "forward_url": f"ws://127.0.0.1:{port}", "access_token": ""})
+        plugin = make_plugin(host, {"mode": "正向", "address": f"ws://127.0.0.1:{port}", "access_token": ""})
         await plugin.on_load()
         try:
             await wait_for(lambda: any(s["ready"] for s in host.states))
@@ -298,7 +301,7 @@ def test_old_goqbot_version_warns(caplog):
         logic = FakeGoqbotLogic(version="1.10.1")
         host = FakeHost()
         port = free_port()
-        plugin = make_plugin(host, {"mode": "reverse", "reverse_port": port})
+        plugin = make_plugin(host, {"mode": "反向", "address": f"ws://127.0.0.1:{port}/onebot/v11/ws"})
         await plugin.on_load()
         session = aiohttp.ClientSession()
         try:

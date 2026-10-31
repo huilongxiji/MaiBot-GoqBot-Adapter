@@ -205,11 +205,11 @@ class ForwardTransport(_BaseTransport):
         self._stopping = False
 
     def describe(self) -> str:
-        return f"正向 {self._config.forward_url if self._config else '?'}"
+        return f"正向 {redact(self._config.address, self._config.access_token) if self._config else '?'}"
 
     def _connect_url(self) -> str:
         assert self._config is not None
-        url = self._config.forward_url
+        url = self._config.address
         if not self._config.access_token:
             return url
         parsed = urlparse(url)
@@ -241,7 +241,7 @@ class ForwardTransport(_BaseTransport):
             if config is None:
                 return
             headers = {"Authorization": f"Bearer {config.access_token}"} if config.access_token else {}
-            display = redact(config.forward_url, config.access_token)
+            display = redact(config.address, config.access_token)
             try:
                 timeout = aiohttp.ClientTimeout(total=None, connect=10)
                 async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
@@ -276,7 +276,7 @@ class ReverseTransport(_BaseTransport):
 
     def describe(self) -> str:
         c = self._config
-        return f"反向 ws://{c.reverse_host}:{c.reverse_port}{c.reverse_path}" if c else "反向 ?"
+        return f"反向 {c.address}" if c else "反向 ?"
 
     async def start(self) -> None:
         if self._runner is not None:
@@ -284,10 +284,11 @@ class ReverseTransport(_BaseTransport):
         config = self._config
         assert config is not None
         app = web.Application()
-        app.router.add_get(config.reverse_path, self._handle)
+        listen = config.parse_address()
+        app.router.add_get(listen.path, self._handle)
         runner = web.AppRunner(app, access_log=None, handle_signals=False)
         await runner.setup()
-        site = web.TCPSite(runner, config.reverse_host, config.reverse_port)
+        site = web.TCPSite(runner, listen.host, listen.port)
         try:
             await site.start()
         except OSError as exc:
@@ -353,7 +354,7 @@ class ReverseTransport(_BaseTransport):
 def build_transport(
     config: ConnectionConfig, logger: Any, on_open: OnOpen, on_close: OnClose, on_event: OnEvent
 ) -> _BaseTransport:
-    cls = ReverseTransport if config.mode == "reverse" else ForwardTransport
+    cls = ReverseTransport if config.is_reverse else ForwardTransport
     transport = cls(logger, on_open, on_close, on_event)
     transport.configure(config)
     return transport

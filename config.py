@@ -2,40 +2,49 @@
 
 配置页说明：
 - 每个配置类的 docstring 会显示为该分组的说明文字；
-- 字段的 ``hint`` 显示在输入框下方；
+- 字段的 ``hint`` 显示在输入框下方，``order`` 决定顺序；
+- 配置页字段按两列网格排列（窄屏为单列），阅读顺序为从左到右、从上到下；
+- 下拉框直接显示取值，所以「连接方式」的取值就是中文「正向 / 反向」；
 - 当前 WebUI 尚未实现字段的条件显示（depends_on），所以依赖关系都写在说明里。
 """
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal
+from dataclasses import dataclass
+from typing import Any, ClassVar, Dict, Literal, Mapping
 from urllib.parse import urlparse
 
 from maibot_sdk import Field, PluginConfigBase
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 
 from .constants import (
     DEFAULT_ACTION_TIMEOUT_SEC,
-    DEFAULT_FORWARD_URL,
+    DEFAULT_ADDRESS,
     DEFAULT_HEARTBEAT_INTERVAL_SEC,
     DEFAULT_PLATFORM,
     DEFAULT_RECONNECT_DELAY_SEC,
-    DEFAULT_REVERSE_HOST,
-    DEFAULT_REVERSE_PATH,
-    DEFAULT_REVERSE_PORT,
+    MODE_FORWARD,
+    MODE_REVERSE,
     RESERVED_PLATFORMS,
     SUPPORTED_CONFIG_VERSION,
 )
 
-ConnectionMode = Literal["forward", "reverse"]
+ConnectionMode = Literal["正向", "反向"]
+
+_MODE_ALIASES = {
+    "forward": MODE_FORWARD,
+    "正向": MODE_FORWARD,
+    "reverse": MODE_REVERSE,
+    "反向": MODE_REVERSE,
+}
 
 
 def _text(value: Any) -> str:
-    return str(value or "").strip()
+    return str(value if value is not None else "").strip()
 
 
 class PluginOptions(PluginConfigBase):
-    """插件总开关。启用后按「连接」分组的设置连接 goqbot。"""
+    """插件总开关与本连接在 MaiBot 中的身份。"""
 
     __ui_label__: ClassVar[str] = "插件设置"
     __ui_icon__: ClassVar[str] = "package"
@@ -50,116 +59,23 @@ class PluginOptions(PluginConfigBase):
             "order": 0,
         },
     )
-    config_version: str = Field(
-        default=SUPPORTED_CONFIG_VERSION,
-        description="配置结构版本。",
-        json_schema_extra={"label": "配置版本", "hidden": True, "disabled": True, "order": 99},
-    )
-
-
-class ConnectionConfig(PluginConfigBase):
-    """与 goqbot 的 OneBot V11 WebSocket 连接。
-
-    正向：插件作为客户端，连接 goqbot 配置里 onebot.servers 的 ws（例如 0.0.0.0:6700）。
-    反向：插件作为服务端监听端口，在 goqbot 的 onebot.servers 里添加一条 ws-reverse 指向这里。
-    两种方式二选一；goqbot 的其他下游（如 NoneBot）不受影响，所有下游都会收到全部事件。
-    """
-
-    __ui_label__: ClassVar[str] = "连接"
-    __ui_icon__: ClassVar[str] = "plug"
-    __ui_order__: ClassVar[int] = 1
-
     platform: str = Field(
         default=DEFAULT_PLATFORM,
         description="连接标识：本连接在 MaiBot 中使用的平台名。",
         json_schema_extra={
             "label": "连接标识",
             "hint": (
-                "默认 qq。同一个 MaiBot 同时接入多个协议端（例如另一个 goqbot、NapCat）时，"
-                "给每个协议端填写不同的标识（如 qq_official），避免用户/群号在 MaiBot 中混在一起。"
-                "修改后 MaiBot 会把它当作一个新平台，原有的聊天记录与人物信息不会自动迁移。"
+                "默认 qq。同一个 MaiBot 接入多个协议端（如另一个 goqbot、NapCat）时，"
+                "为每个协议端填写不同的标识（如 qq_official）。修改后视为新平台，原有聊天记录不会迁移。"
             ),
-            "placeholder": "qq",
-            "order": 0,
-        },
-    )
-    mode: ConnectionMode = Field(
-        default="forward",
-        description="连接方式：forward=正向（插件连 goqbot），reverse=反向（goqbot 连插件）。",
-        json_schema_extra={
-            "label": "连接方式",
-            "hint": "forward：填写下方「正向地址」；reverse：填写下方「反向监听」三项，并在 goqbot 中配置 ws-reverse。",
+            "placeholder": DEFAULT_PLATFORM,
             "order": 1,
         },
     )
-    forward_url: str = Field(
-        default=DEFAULT_FORWARD_URL,
-        description="正向 WebSocket 地址（仅 forward 模式使用）。",
-        json_schema_extra={
-            "label": "正向地址",
-            "hint": "goqbot 正向 ws 的地址，例如 ws://127.0.0.1:6700。仅在连接方式为 forward 时生效。",
-            "placeholder": DEFAULT_FORWARD_URL,
-            "order": 2,
-        },
-    )
-    reverse_host: str = Field(
-        default=DEFAULT_REVERSE_HOST,
-        description="反向 WebSocket 监听地址（仅 reverse 模式使用）。",
-        json_schema_extra={
-            "label": "反向监听地址",
-            "hint": "goqbot 与 MaiBot 在同一台机器时保持 127.0.0.1；跨机器/容器时改为 0.0.0.0 并务必设置访问令牌。",
-            "placeholder": DEFAULT_REVERSE_HOST,
-            "order": 3,
-        },
-    )
-    reverse_port: int = Field(
-        default=DEFAULT_REVERSE_PORT,
-        ge=1,
-        le=65535,
-        description="反向 WebSocket 监听端口（仅 reverse 模式使用）。",
-        json_schema_extra={"label": "反向监听端口", "order": 4, "step": 1},
-    )
-    reverse_path: str = Field(
-        default=DEFAULT_REVERSE_PATH,
-        description="反向 WebSocket 路径（仅 reverse 模式使用）。",
-        json_schema_extra={
-            "label": "反向路径",
-            "hint": (
-                "goqbot 中对应写法：ws-reverse.universal: ws://<监听地址>:<端口><路径>，"
-                "例如 ws://127.0.0.1:8095/onebot/v11/ws。"
-            ),
-            "placeholder": DEFAULT_REVERSE_PATH,
-            "order": 5,
-        },
-    )
-    access_token: str = Field(
-        default="",
-        description="访问令牌，需与 goqbot 的 onebot.access_token 一致；为空表示不鉴权。",
-        json_schema_extra={
-            "label": "访问令牌",
-            "hint": "与 goqbot 配置 onebot.access_token 保持一致。正向时插件携带它，反向时插件用它校验 goqbot。",
-            "input_type": "password",
-            "placeholder": "可留空",
-            "order": 6,
-        },
-    )
-    reconnect_delay_sec: float = Field(
-        default=DEFAULT_RECONNECT_DELAY_SEC,
-        gt=0,
-        description="正向连接断开后的重连等待（秒）。",
-        json_schema_extra={"label": "重连等待（秒）", "order": 7, "step": 1},
-    )
-    heartbeat_interval_sec: float = Field(
-        default=DEFAULT_HEARTBEAT_INTERVAL_SEC,
-        gt=0,
-        description="WebSocket 协议层 ping 保活间隔（秒）。",
-        json_schema_extra={"label": "心跳间隔（秒）", "order": 8, "step": 1},
-    )
-    action_timeout_sec: float = Field(
-        default=DEFAULT_ACTION_TIMEOUT_SEC,
-        gt=0,
-        description="调用 goqbot 动作（发消息、查询等）的超时（秒）。",
-        json_schema_extra={"label": "动作超时（秒）", "order": 9, "step": 1},
+    config_version: str = Field(
+        default=SUPPORTED_CONFIG_VERSION,
+        description="配置结构版本。",
+        json_schema_extra={"label": "配置版本", "hidden": True, "disabled": True, "order": 99},
     )
 
     @field_validator("platform", mode="before")
@@ -172,51 +88,158 @@ class ConnectionConfig(PluginConfigBase):
             raise ValueError(f"连接标识不能使用 MaiBot 保留名称: {platform}")
         return platform
 
-    @field_validator("forward_url", "reverse_host", "access_token", mode="before")
+
+@dataclass(frozen=True)
+class ParsedAddress:
+    scheme: str
+    host: str
+    port: int
+    path: str
+
+
+class ConnectionConfig(PluginConfigBase):
+    """配置 goqbot 与 maibot 之间的连接方式"""
+
+    __ui_label__: ClassVar[str] = "连接"
+    __ui_icon__: ClassVar[str] = "plug"
+    __ui_order__: ClassVar[int] = 1
+
+    mode: ConnectionMode = Field(
+        default=MODE_FORWARD,
+        description="连接方式。",
+        json_schema_extra={
+            "label": "连接方式",
+            "hint": "正向：插件连接 goqbot；反向：goqbot 连接插件。",
+            "order": 0,
+        },
+    )
+    address: str = Field(
+        default=DEFAULT_ADDRESS,
+        description="WebSocket 完整地址。",
+        json_schema_extra={
+            "label": "地址",
+            "hint": "需要根据连接方式选择对应的编写格式，参考文档当中示例",
+            "placeholder": DEFAULT_ADDRESS,
+            "order": 1,
+        },
+    )
+    access_token: str = Field(
+        default="",
+        description="访问令牌，需与 goqbot 的 onebot.access_token 一致。",
+        json_schema_extra={
+            "label": "访问令牌",
+            "hint": "与 goqbot 的 onebot.access_token 保持一致；留空表示不鉴权（反向监听非本机地址时请务必设置）。",
+            "x-widget": "password",
+            "placeholder": "留空则不鉴权",
+            "order": 2,
+        },
+    )
+    reconnect_delay_sec: float = Field(
+        default=DEFAULT_RECONNECT_DELAY_SEC,
+        ge=1,
+        le=3600,
+        description="连接断开后的重连等待时间（秒）。",
+        json_schema_extra={
+            "label": "重连等待（秒）",
+            "hint": "仅正向生效；反向的重连间隔由 goqbot 的 reconnect-interval 决定。",
+            "order": 3,
+            "step": 1,
+        },
+    )
+    heartbeat_interval_sec: float = Field(
+        default=DEFAULT_HEARTBEAT_INTERVAL_SEC,
+        ge=5,
+        le=3600,
+        description="WebSocket 心跳保活间隔（秒）。",
+        json_schema_extra={
+            "label": "心跳间隔（秒）",
+            "hint": "定时发送 WebSocket ping，及时发现已经失效的连接。",
+            "order": 4,
+            "step": 5,
+        },
+    )
+    action_timeout_sec: float = Field(
+        default=DEFAULT_ACTION_TIMEOUT_SEC,
+        ge=1,
+        le=600,
+        description="调用 goqbot 动作的超时时间（秒）。",
+        json_schema_extra={
+            "label": "动作超时（秒）",
+            "hint": "发消息、查询等动作超过该时间未响应即判定失败。",
+            "order": 5,
+            "step": 1,
+        },
+    )
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _normalize_mode(cls, value: Any) -> str:
+        return _MODE_ALIASES.get(_text(value).lower(), _MODE_ALIASES.get(_text(value), MODE_FORWARD))
+
+    @field_validator("address", "access_token", mode="before")
     @classmethod
     def _strip_text(cls, value: Any) -> str:
         return _text(value)
 
-    @field_validator("reverse_path", mode="before")
-    @classmethod
-    def _normalize_path(cls, value: Any) -> str:
-        path = _text(value) or DEFAULT_REVERSE_PATH
-        return path if path.startswith("/") else f"/{path}"
+    @property
+    def is_reverse(self) -> bool:
+        return self.mode == MODE_REVERSE
 
-    def forward_url_error(self) -> str:
-        """校验正向地址，返回错误描述；合法时返回空串。"""
+    def parse_address(self) -> ParsedAddress:
+        """解析「地址」；不合法时抛出 ``ValueError``（错误信息可直接展示给用户）。"""
 
-        parsed = urlparse(self.forward_url)
+        parsed = urlparse(self.address)
+        example = "ws://127.0.0.1:8095/onebot/v11/ws" if self.is_reverse else DEFAULT_ADDRESS
         if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
-            return f"正向地址无效: {self.forward_url!r}（应形如 ws://127.0.0.1:6700）"
+            raise ValueError(f"地址无效: {self.address!r}（应形如 {example}）")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError(f"地址端口无效: {self.address!r}") from exc
+        if self.is_reverse:
+            if parsed.scheme != "ws":
+                raise ValueError("反向监听不支持 wss://，请使用 ws://（如需 TLS 请在前面加反向代理）")
+            if port is None:
+                raise ValueError(f"反向监听地址需要写明端口: {self.address!r}（应形如 {example}）")
+        if port is None:
+            port = 443 if parsed.scheme == "wss" else 80
+        return ParsedAddress(parsed.scheme, parsed.hostname, port, parsed.path or "/")
+
+    def address_error(self) -> str:
+        try:
+            self.parse_address()
+        except ValueError as exc:
+            return str(exc)
         return ""
 
 
 class ActiveMessageConfig(PluginConfigBase):
-    """主动消息（没有可用被动回复凭证时的发送）。
-
-    QQ 官方机器人回复分两种：
-    · 被动回复：针对用户刚发的消息回复。群聊每条消息 5 分钟内最多回复 5 次，私聊 60 分钟内最多 4 次。
-      这份额度由 goqbot 的所有下游（NoneBot、MaiBot 等）共用。
-    · 主动消息：不依赖用户消息直接发送。群聊需群主开启「机器人在群聊内发言」；
-      官方频控为机器人维度 60 条/分钟（未认证 30 条/分钟）、单群每天最多 1000 条，超额直接发送失败。
-      私聊主动推送需用户未关闭推送，且额度极少。
-
-    插件发送时总是先尝试被动回复（要求 goqbot >= 1.11.0 的 passive_only）。
-    只有被动凭证用完或过期时，才按下面的开关决定是否改发主动消息；关闭时该条消息直接丢弃并记录日志。
+    """
+    主动消息（没有可用被动回复凭证时的发送）。
+    群聊每条消息 5 分钟内最多回复 5 次，私聊 60 分钟内最多 4 次。群聊需群主开启「机器人主动在群聊内发言」的开关；
+    官方频控为机器人维度 60 条/分钟（未认证 30 条/分钟）、单群每天最多 1000 条，超额直接发送失败。
     """
 
     __ui_label__: ClassVar[str] = "主动消息"
     __ui_icon__: ClassVar[str] = "send"
     __ui_order__: ClassVar[int] = 2
 
+    private_enabled: bool = Field(
+        default=False,
+        description="私聊：无被动凭证时是否改发主动消息。",
+        json_schema_extra={
+            "label": "私聊主动消息",
+            "hint": "默认关闭，与群聊开关相互独立。私聊主动推送额度极少，且用户可在 QQ 中关闭推送。",
+            "order": 0,
+        },
+    )
     group_enabled: bool = Field(
         default=False,
         description="群聊：无被动凭证时是否改发主动消息。",
         json_schema_extra={
             "label": "群聊主动消息",
             "hint": "默认关闭。开启后受下方「单群频率限制」约束；关闭时下方两项不生效。",
-            "order": 0,
+            "order": 1,
         },
     )
     group_max_per_window: int = Field(
@@ -227,7 +250,7 @@ class ActiveMessageConfig(PluginConfigBase):
         json_schema_extra={
             "label": "单群最多条数",
             "hint": "仅在开启「群聊主动消息」时生效，只统计主动消息，被动回复不计入。",
-            "order": 1,
+            "order": 2,
             "step": 1,
         },
     )
@@ -239,17 +262,8 @@ class ActiveMessageConfig(PluginConfigBase):
         json_schema_extra={
             "label": "时间窗口（秒）",
             "hint": "例如 5 条 / 600 秒 表示每个群每 10 分钟最多 5 条主动消息，超出的消息直接丢弃。",
-            "order": 2,
-            "step": 10,
-        },
-    )
-    private_enabled: bool = Field(
-        default=False,
-        description="私聊：无被动凭证时是否改发主动消息。",
-        json_schema_extra={
-            "label": "私聊主动消息",
-            "hint": "默认关闭，与群聊开关相互独立。私聊主动推送额度极少，且用户可在 QQ 中关闭推送。",
             "order": 3,
+            "step": 10,
         },
     )
 
@@ -293,6 +307,44 @@ class DebugConfig(PluginConfigBase):
     )
 
 
+
+def _migrate_v1_0(raw: Dict[str, Any]) -> None:
+    """把 0.1.0（配置版本 1.0.0）的连接配置迁移到当前结构。
+
+    旧结构：connection.platform / forward_url / reverse_host / reverse_port / reverse_path，
+    mode 取 forward / reverse。SDK 会在校验前用默认值补齐缺失字段，所以这里以
+    「字段仍是默认值」判断用户是否已在新结构中填写过。
+    """
+
+    conn = raw.get("connection")
+    plugin = raw.get("plugin")
+    if not isinstance(conn, dict):
+        return
+    if not isinstance(plugin, dict):
+        plugin = raw["plugin"] = {}
+
+    legacy_platform = _text(conn.pop("platform", ""))
+    if legacy_platform and _text(plugin.get("platform")) in {"", DEFAULT_PLATFORM}:
+        plugin["platform"] = legacy_platform
+
+    legacy_keys = ("forward_url", "reverse_host", "reverse_port", "reverse_path")
+    if not any(key in conn for key in legacy_keys):
+        return
+    forward_url = _text(conn.pop("forward_url", ""))
+    host = _text(conn.pop("reverse_host", "")) or "127.0.0.1"
+    port = _text(conn.pop("reverse_port", "")) or "8095"
+    path = _text(conn.pop("reverse_path", "")) or "/onebot/v11/ws"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    if _text(conn.get("address")) not in {"", DEFAULT_ADDRESS}:
+        return
+    mode = _MODE_ALIASES.get(_text(conn.get("mode")).lower(), MODE_FORWARD)
+    if mode == MODE_REVERSE:
+        conn["address"] = f"ws://{host}:{port}{path}"
+    elif forward_url:
+        conn["address"] = forward_url
+
+
 class GoqbotAdapterSettings(PluginConfigBase):
     """goqbot 适配器完整配置。"""
 
@@ -302,6 +354,18 @@ class GoqbotAdapterSettings(PluginConfigBase):
     message: MessageConfig = Field(default_factory=MessageConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate(cls, raw: Any) -> Any:
+        if not isinstance(raw, Mapping):
+            return raw
+        data: Dict[str, Any] = {k: (dict(v) if isinstance(v, Mapping) else v) for k, v in raw.items()}
+        _migrate_v1_0(data)
+        plugin = data.get("plugin")
+        if isinstance(plugin, dict) and _text(plugin.get("config_version")) in {"1.0.0"}:
+            plugin["config_version"] = SUPPORTED_CONFIG_VERSION
+        return data
+
     def runtime_config_error(self) -> str:
         """返回阻止建立连接的配置错误；无错误时返回空串。"""
 
@@ -309,8 +373,4 @@ class GoqbotAdapterSettings(PluginConfigBase):
             return (
                 f"配置版本不兼容：当前 {self.plugin.config_version!r}，插件要求 {SUPPORTED_CONFIG_VERSION!r}"
             )
-        if self.connection.mode == "forward":
-            return self.connection.forward_url_error()
-        if not self.connection.reverse_host:
-            return "反向监听地址为空"
-        return ""
+        return self.connection.address_error()

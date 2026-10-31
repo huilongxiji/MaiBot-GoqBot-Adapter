@@ -244,7 +244,7 @@ class GoqbotAdapterPlugin(MaiBotPlugin):
         if not self_id or self_id == "0":
             raise RuntimeError("无法从 goqbot 获取 self_id（get_login_info 未返回 user_id）")
 
-        platform = settings.connection.platform
+        platform = settings.plugin.platform
         accepted = await self.ctx.gateway.update_state(
             GATEWAY_NAME,
             ready=True,
